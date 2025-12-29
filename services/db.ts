@@ -1,7 +1,7 @@
 
 import { AnkiDeck, AISettings, StudyLog, CardStatus, BookmarkFolder, Bookmark, AnkiCard } from '../types';
 
-const DB_NAME = 'AnkiFlowLocalDB';
+const DB_NAME = 'FlowCardsLocalDB';
 const DECKS_STORE = 'decks';
 const SETTINGS_STORE = 'settings';
 const LOGS_STORE = 'study_logs';

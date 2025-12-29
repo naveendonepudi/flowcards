@@ -54,7 +54,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const checkSession = async () => {
-      const session = localStorage.getItem('ankiflow_session');
+      const session = localStorage.getItem('flowcards_session');
       if (session) {
         setUsername(session);
         await syncAllData(session);
@@ -105,7 +105,7 @@ const App: React.FC = () => {
     setAuthError('');
 
     try {
-      localStorage.setItem('ankiflow_session', username.trim());
+      localStorage.setItem('flowcards_session', username.trim());
       await syncAllData(username.trim());
       setState(prev => ({ ...prev, view: 'library' }));
     } catch (err: any) {
@@ -116,13 +116,13 @@ const App: React.FC = () => {
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('ankiflow_session');
+    localStorage.removeItem('flowcards_session');
     setState(prev => ({ ...prev, view: 'login', decks: [], selectedDeck: null, studiedCardIds: new Set(), cardStatuses: {}, sessionReviewedCardIds: [] }));
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    const user = localStorage.getItem('ankiflow_session');
+    const user = localStorage.getItem('flowcards_session');
     if (!file || !user) return;
     
     setState(prev => ({ ...prev, isLoading: true }));
@@ -139,7 +139,7 @@ const App: React.FC = () => {
   };
 
   const deleteDeck = useCallback(async (deckId: number) => {
-    const user = localStorage.getItem('ankiflow_session');
+    const user = localStorage.getItem('flowcards_session');
     if (!user) return;
     if (!window.confirm("Delete permanently from this device? This will also clear study history for this deck.")) return;
     try {
@@ -154,7 +154,7 @@ const App: React.FC = () => {
   }, [state.decks]);
 
   const markCurrentAsRead = useCallback(async () => {
-    const user = localStorage.getItem('ankiflow_session');
+    const user = localStorage.getItem('flowcards_session');
     const deck = state.selectedDeck;
     const card = deck?.cards[state.currentCardIndex];
     
@@ -177,7 +177,7 @@ const App: React.FC = () => {
   }, [state.selectedDeck, state.currentCardIndex]);
 
   const scheduleNextReview = async (intervalDays: number) => {
-    const user = localStorage.getItem('ankiflow_session');
+    const user = localStorage.getItem('flowcards_session');
     const deck = state.selectedDeck;
     const card = deck?.cards[state.currentCardIndex];
     
@@ -217,7 +217,7 @@ const App: React.FC = () => {
   }, []);
 
   const openDeckDetail = async (deck: AnkiDeck) => {
-    const user = localStorage.getItem('ankiflow_session');
+    const user = localStorage.getItem('flowcards_session');
     if (user) {
       const statuses = await dbService.getCardStatusesForDeck(user, deck.id);
       setState(prev => ({ 
@@ -256,7 +256,7 @@ const App: React.FC = () => {
     return counts;
   }, [dueCards]);
 
-  const currentUserInitial = useMemo(() => (localStorage.getItem('ankiflow_session') || '?').charAt(0).toUpperCase(), [state.view]);
+  const currentUserInitial = useMemo(() => (localStorage.getItem('flowcards_session') || '?').charAt(0).toUpperCase(), [state.view]);
   const filteredDecks = state.decks.filter(d => d.name.toLowerCase().includes(searchQuery.toLowerCase()));
   const currentCard = state.selectedDeck?.cards[state.currentCardIndex];
 
@@ -279,7 +279,7 @@ const App: React.FC = () => {
                  <div className="w-20 h-20 bg-slate-950 rounded-3xl flex items-center justify-center mx-auto shadow-xl shadow-slate-200 mb-6">
                     <GraduationCap className="w-12 h-12 text-white" />
                  </div>
-                 <h1 className="text-3xl font-black tracking-tight text-slate-900">AnkiFlow</h1>
+                 <h1 className="text-3xl font-black tracking-tight text-slate-900">Flow Cards</h1>
                  <p className="text-slate-400 font-bold uppercase tracking-[0.2em] text-[10px]">On-Device Medical Study</p>
               </div>
 
@@ -524,8 +524,8 @@ const App: React.FC = () => {
               </div>
            )}
 
-           {state.view === 'analytics' && <AnalyticsView username={localStorage.getItem('ankiflow_session') || ''} decks={state.decks} onBack={() => setState(prev => ({ ...prev, view: 'library' }))} />}
-           {state.view === 'bookmarks' && <BookmarksView username={localStorage.getItem('ankiflow_session') || ''} onBack={() => setState(prev => ({ ...prev, view: 'library' }))} onStudyCard={(card) => setState(prev => ({ ...prev, view: 'study', selectedDeck: { id: -1, name: 'Saved Preview', cards: [card] }, currentCardIndex: 0, isFlipped: false, sessionReviewedCardIds: [] }))} />}
+           {state.view === 'analytics' && <AnalyticsView username={localStorage.getItem('flowcards_session') || ''} decks={state.decks} onBack={() => setState(prev => ({ ...prev, view: 'library' }))} />}
+           {state.view === 'bookmarks' && <BookmarksView username={localStorage.getItem('flowcards_session') || ''} onBack={() => setState(prev => ({ ...prev, view: 'library' }))} onStudyCard={(card) => setState(prev => ({ ...prev, view: 'study', selectedDeck: { id: -1, name: 'Saved Preview', cards: [card] }, currentCardIndex: 0, isFlipped: false, sessionReviewedCardIds: [] }))} />}
         </div>
       )}
 
@@ -537,7 +537,7 @@ const App: React.FC = () => {
               <div className="flex gap-4">
                  <button onClick={() => setIsDeckModalOpen(false)} className="flex-1 py-5 rounded-2xl font-black uppercase tracking-widest text-slate-400 hover:bg-slate-50 transition-colors">Cancel</button>
                  <button onClick={async () => {
-                    const user = localStorage.getItem('ankiflow_session');
+                    const user = localStorage.getItem('flowcards_session');
                     if (deckNameInput.trim() && user) {
                       const newDeck = { id: Date.now(), name: deckNameInput.trim(), cards: [] };
                       await dbService.saveDecks(user, [newDeck]);
@@ -554,7 +554,7 @@ const App: React.FC = () => {
       {currentCard && (
         <BookmarkModal 
            isOpen={isBookmarkModalOpen}
-           username={localStorage.getItem('ankiflow_session') || ''}
+           username={localStorage.getItem('flowcards_session') || ''}
            card={currentCard}
            deckName={state.selectedDeck?.name || 'Unknown Deck'}
            onClose={() => setIsBookmarkModalOpen(false)}
