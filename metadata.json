@@ -1,0 +1,7 @@
+{
+  "name": "FlowCards",
+  "description": "A high-performance Anki file viewer and study companion. Import your .apkg files and use Gemini AI to deepen your understanding with smart explanations.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
