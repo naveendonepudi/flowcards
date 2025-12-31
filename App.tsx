@@ -5,7 +5,8 @@ import {
   Layers, Trash2, RotateCcw, Activity, LogOut, Database, AlertCircle, UserCircle,
   BarChart2, Bookmark, BookmarkPlus, Clock, CalendarCheck, Zap, ListFilter, Play,
   LayoutGrid, ClipboardList, CheckCircle, PartyPopper, CheckCircle2, Check, ArrowLeft,
-  FastForward, ShieldCheck, Stars
+  FastForward, ShieldCheck, Stars, RefreshCw, Cloud, CloudUpload, CloudDownload, Download, Upload,
+  Mail, Lock, Eye, EyeOff
 } from 'lucide-react';
 import { AnkiDeck, AppState, AnkiCard, AIProvider, AISettings, CardStatus } from './types';
 import { parseAnkiFile } from './services/ankiParser';
@@ -17,15 +18,42 @@ import { DeckDetailView } from './components/DeckDetailView';
 import { BookmarkModal } from './components/BookmarkModal';
 import { BookmarksView } from './components/BookmarksView';
 import * as dbService from './services/db';
+import * as syncService from './services/syncService';
 
 const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [loginModalState, setLoginModalState] = useState<{ isOpen: boolean; provider: AIProvider | null }>({ isOpen: false, provider: null });
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isBookmarkModalOpen, setIsBookmarkModalOpen] = useState(false);
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncError, setSyncError] = useState('');
+  const [syncSuccess, setSyncSuccess] = useState('');
+  const [couchdbUrl, setCouchdbUrl] = useState(() => {
+    const stored = localStorage.getItem('couchdb_url');
+    if (stored) return stored;
+    // In development, suggest using proxy
+    try {
+      // @ts-ignore - Vite env variable
+      if (import.meta.env?.DEV) {
+        const useProxy = localStorage.getItem('couchdb_use_proxy') === 'true';
+        if (useProxy) return '/couchdb';
+      }
+    } catch (e) {
+      // Ignore if import.meta is not available
+    }
+    return 'http://localhost:5984';
+  });
+  const [useProxy, setUseProxy] = useState(() => {
+    return localStorage.getItem('couchdb_use_proxy') === 'true';
+  });
   const profileRef = useRef<HTMLDivElement>(null);
 
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [fullname, setFullname] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [isLoginMode, setIsLoginMode] = useState(true);
   const [authError, setAuthError] = useState('');
   const [isProcessingAuth, setIsProcessingAuth] = useState(false);
 
@@ -56,7 +84,6 @@ const App: React.FC = () => {
     const checkSession = async () => {
       const session = localStorage.getItem('flowcards_session');
       if (session) {
-        setUsername(session);
         await syncAllData(session);
         setState(prev => ({ ...prev, view: 'library' }));
       } else {
@@ -96,8 +123,25 @@ const App: React.FC = () => {
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!username.trim()) {
-      setAuthError('Please enter a profile name');
+    if (!email.trim() || !password.trim()) {
+      setAuthError(isLoginMode ? 'Please enter email and password' : 'Please enter email and password to register');
+      return;
+    }
+
+    if (!isLoginMode && !fullname.trim()) {
+      setAuthError('Please enter your full name');
+      return;
+    }
+
+    // Basic email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      setAuthError('Please enter a valid email address');
+      return;
+    }
+
+    if (password.length < 6) {
+      setAuthError('Password must be at least 6 characters long');
       return;
     }
 
@@ -105,11 +149,23 @@ const App: React.FC = () => {
     setAuthError('');
 
     try {
-      localStorage.setItem('flowcards_session', username.trim());
-      await syncAllData(username.trim());
-      setState(prev => ({ ...prev, view: 'library' }));
+      const { loginUser, registerUser } = await import('./services/couchdbAuth');
+      
+      if (isLoginMode) {
+        const user = await loginUser(email.trim(), password);
+        localStorage.setItem('flowcards_session', user.email);
+        await syncAllData(user.email);
+        setState(prev => ({ ...prev, view: 'library' }));
+      } else {
+        await registerUser(email.trim(), password, fullname.trim());
+        // After registration, automatically log in
+        const user = await loginUser(email.trim(), password);
+        localStorage.setItem('flowcards_session', user.email);
+        await syncAllData(user.email);
+        setState(prev => ({ ...prev, view: 'library' }));
+      }
     } catch (err: any) {
-      setAuthError("Failed to initialize local profile.");
+      setAuthError(err.message || (isLoginMode ? 'Login failed. Please try again.' : 'Registration failed. Please try again.'));
     } finally {
       setIsProcessingAuth(false);
     }
@@ -117,6 +173,9 @@ const App: React.FC = () => {
 
   const handleLogout = () => {
     localStorage.removeItem('flowcards_session');
+    setEmail('');
+    setPassword('');
+    setFullname('');
     setState(prev => ({ ...prev, view: 'login', decks: [], selectedDeck: null, studiedCardIds: new Set(), cardStatuses: {}, sessionReviewedCardIds: [] }));
   };
 
@@ -256,7 +315,14 @@ const App: React.FC = () => {
     return counts;
   }, [dueCards]);
 
-  const currentUserInitial = useMemo(() => (localStorage.getItem('flowcards_session') || '?').charAt(0).toUpperCase(), [state.view]);
+  const currentUserEmail = useMemo(() => localStorage.getItem('flowcards_session') || '', [state.view]);
+  const currentUserInitial = useMemo(() => {
+    const email = currentUserEmail;
+    if (email) {
+      return email.charAt(0).toUpperCase();
+    }
+    return '?';
+  }, [currentUserEmail]);
   const filteredDecks = state.decks.filter(d => d.name.toLowerCase().includes(searchQuery.toLowerCase()));
   const currentCard = state.selectedDeck?.cards[state.currentCardIndex];
 
@@ -302,6 +368,109 @@ const App: React.FC = () => {
     }
   };
 
+  const handleSyncUpload = async () => {
+    const user = localStorage.getItem('flowcards_session');
+    if (!user) return;
+
+    setIsSyncing(true);
+    setSyncError('');
+    setSyncSuccess('');
+
+    try {
+      const syncData = await syncService.exportUserData(user);
+      await syncService.uploadToCloud(syncData);
+        setSyncSuccess('Progress synced to cloud successfully!');
+      
+      setTimeout(() => {
+        setSyncSuccess('');
+        setIsSyncModalOpen(false);
+      }, 2000);
+    } catch (err: any) {
+      setSyncError(err.message || 'Failed to sync. Please try again.');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleSyncDownload = async () => {
+    const user = localStorage.getItem('flowcards_session');
+    if (!user) return;
+
+    setIsSyncing(true);
+    setSyncError('');
+    setSyncSuccess('');
+
+    try {
+      const syncData = await syncService.downloadFromCloud(user);
+      if (!syncData) {
+        setSyncError('No sync data found in cloud.');
+        setIsSyncing(false);
+        return;
+      }
+
+      await syncService.importUserData(syncData, 'merge');
+      await syncAllData(user);
+      setSyncSuccess('Progress synced from cloud successfully!');
+      setTimeout(() => {
+        setSyncSuccess('');
+        setIsSyncModalOpen(false);
+      }, 2000);
+    } catch (err: any) {
+      setSyncError(err.message || 'Failed to sync. Please try again.');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleExportFile = async () => {
+    const user = localStorage.getItem('flowcards_session');
+    if (!user) return;
+
+    try {
+      const syncData = await syncService.exportUserData(user);
+      syncService.exportToFile(syncData);
+      setSyncSuccess('Progress exported to file!');
+      setTimeout(() => {
+        setSyncSuccess('');
+        setIsSyncModalOpen(false);
+      }, 2000);
+    } catch (err: any) {
+      setSyncError(err.message || 'Failed to export. Please try again.');
+    }
+  };
+
+  const handleImportFile = async () => {
+    const user = localStorage.getItem('flowcards_session');
+    if (!user) return;
+
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/json';
+    input.onchange = async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (file) {
+        setIsSyncing(true);
+        setSyncError('');
+        setSyncSuccess('');
+        try {
+          const syncData = await syncService.importFromFile(file);
+          await syncService.importUserData(syncData, 'merge');
+          await syncAllData(user);
+          setSyncSuccess('Progress imported successfully!');
+          setTimeout(() => {
+            setSyncSuccess('');
+            setIsSyncModalOpen(false);
+          }, 2000);
+        } catch (err: any) {
+          setSyncError(err.message || 'Failed to import file.');
+        } finally {
+          setIsSyncing(false);
+        }
+      }
+    };
+    input.click();
+  };
+
   if (state.isLoading && state.view !== 'login') {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -320,7 +489,7 @@ const App: React.FC = () => {
                 <GraduationCap className="w-12 h-12 text-white" />
               </div>
               <h1 className="text-3xl font-black tracking-tight text-slate-900">Flow Cards</h1>
-              <p className="text-slate-400 font-bold uppercase tracking-[0.2em] text-[10px]">On-Device Medical Study</p>
+              <p className="text-slate-400 font-bold uppercase tracking-[0.2em] text-[10px]"></p>
             </div>
 
             {authError && (
@@ -331,39 +500,80 @@ const App: React.FC = () => {
             )}
 
             <div className="space-y-4">
+              {!isLoginMode && (
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 ml-1">Full Name</label>
+                  <div className="relative group">
+                    <UserCircle className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-300 group-focus-within:text-slate-950 transition-colors" />
+                    <input
+                      type="text"
+                      value={fullname}
+                      onChange={e => setFullname(e.target.value)}
+                      placeholder="Enter your full name"
+                      className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl py-5 pl-14 pr-6 focus:border-slate-950 outline-none transition-all font-bold"
+                      autoComplete="name"
+                    />
+                  </div>
+                </div>
+              )}
               <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 ml-1">Profile Name</label>
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 ml-1">Email</label>
                 <div className="relative group">
-                  <UserCircle className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-300 group-focus-within:text-slate-950 transition-colors" />
+                  <Mail className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-300 group-focus-within:text-slate-950 transition-colors" />
                   <input
-                    type="text"
-                    value={username}
-                    onChange={e => setUsername(e.target.value)}
-                    placeholder="e.g. Dr. Jane"
+                    type="email"
+                    value={email}
+                    onChange={e => setEmail(e.target.value)}
+                    placeholder="your.email@example.com"
                     className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl py-5 pl-14 pr-6 focus:border-slate-950 outline-none transition-all font-bold"
+                    autoComplete="email"
                   />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 ml-1">Password</label>
+                <div className="relative group">
+                  <Lock className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-300 group-focus-within:text-slate-950 transition-colors" />
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    value={password}
+                    onChange={e => setPassword(e.target.value)}
+                    placeholder="Enter your password"
+                    className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl py-5 pl-14 pr-14 focus:border-slate-950 outline-none transition-all font-bold"
+                    autoComplete={isLoginMode ? "current-password" : "new-password"}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-950 transition-colors"
+                  >
+                    {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                  </button>
                 </div>
               </div>
             </div>
 
             <div className="flex flex-col gap-3">
-              <button disabled={isProcessingAuth} className="w-full bg-slate-950 text-white py-5 rounded-2xl font-black uppercase tracking-widest shadow-xl active:scale-95 transition-all disabled:opacity-50 relative overflow-hidden">
+              <button disabled={isProcessingAuth} type="submit" className="w-full bg-slate-950 text-white py-5 rounded-2xl font-black uppercase tracking-widest shadow-xl active:scale-95 transition-all disabled:opacity-50 relative overflow-hidden">
                 {isProcessingAuth ? (
                   <div className="flex items-center justify-center gap-3">
                     <Activity className="w-5 h-5 animate-medical-heartbeat" />
-                    <span>Initializing...</span>
+                    <span>{isLoginMode ? 'Logging in...' : 'Registering...'}</span>
                   </div>
-                ) : 'Enter Library'}
+                ) : (isLoginMode ? 'Login' : 'Register')}
               </button>
-            </div>
-
-            <div className="p-6 bg-slate-50 rounded-[32px] border border-slate-100">
-              <div className="flex items-center gap-3 text-[10px] font-black text-slate-950 uppercase tracking-widest mb-2">
-                <Database className="w-4 h-4" /> Local Storage Active
-              </div>
-              <p className="text-[10px] text-slate-400 font-bold leading-relaxed">
-                All decks and study data stay on this device.
-              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsLoginMode(!isLoginMode);
+                  setAuthError('');
+                  setPassword('');
+                  setFullname('');
+                }}
+                className="w-full text-slate-400 hover:text-slate-950 py-3 rounded-2xl font-bold text-sm transition-colors"
+              >
+                {isLoginMode ? "Don't have an account? Register" : "Already have an account? Login"}
+              </button>
             </div>
           </form>
         </div>
@@ -379,13 +589,23 @@ const App: React.FC = () => {
               <h2 className="text-2xl font-black tracking-tight hidden sm:block">Repository</h2>
             </div>
             <div className="flex items-center gap-4">
+              <button 
+                onClick={() => setIsSyncModalOpen(true)} 
+                className={`p-3 rounded-2xl transition-all ${isSyncModalOpen ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-400 hover:text-indigo-600 border border-slate-200 shadow-sm'}`}
+                title="Sync Progress"
+              >
+                <RefreshCw className="w-6 h-6" />
+              </button>
               <button onClick={() => setState(prev => ({ ...prev, view: 'bookmarks' }))} className={`p-3 rounded-2xl transition-all ${state.view === 'bookmarks' ? 'bg-amber-500 text-white shadow-lg' : 'bg-white text-slate-400 hover:text-amber-600 border border-slate-200 shadow-sm'}`}><Bookmark className="w-6 h-6" /></button>
               <button onClick={() => setState(prev => ({ ...prev, view: 'analytics' }))} className={`p-3 rounded-2xl transition-all ${state.view === 'analytics' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-400 hover:text-indigo-600 border border-slate-200 shadow-sm'}`}><BarChart2 className="w-6 h-6" /></button>
               <div className="relative" ref={profileRef}>
                 <button onClick={() => setIsProfileMenuOpen(!isProfileMenuOpen)} className="w-12 h-12 bg-white rounded-2xl border border-slate-200 flex items-center justify-center font-black text-slate-950 shadow-sm transition-all hover:bg-slate-50 active:scale-90">{currentUserInitial}</button>
                 {isProfileMenuOpen && (
                   <div className="absolute right-0 mt-3 w-56 bg-white rounded-3xl shadow-2xl border border-slate-100 p-3 z-50 animate-in slide-in-from-top-2">
-                    <button onClick={handleLogout} className="w-full flex items-center gap-3 p-4 text-red-600 font-bold text-sm hover:bg-red-50 rounded-2xl transition-all"><LogOut className="w-5 h-5" /> Switch Profile</button>
+                    <div className="px-4 py-2 text-xs text-slate-600 font-bold border-b border-slate-100 mb-2">
+                      {currentUserEmail}
+                    </div>
+                    <button onClick={handleLogout} className="w-full flex items-center gap-3 p-4 text-red-600 font-bold text-sm hover:bg-red-50 rounded-2xl transition-all"><LogOut className="w-5 h-5" /> Logout</button>
                   </div>
                 )}
               </div>
@@ -608,6 +828,173 @@ const App: React.FC = () => {
           deckName={state.selectedDeck?.name || 'Unknown Deck'}
           onClose={() => setIsBookmarkModalOpen(false)}
         />
+      )}
+
+      {isSyncModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-950/40 backdrop-blur-sm animate-in fade-in duration-300">
+          <div className="w-full max-w-md bg-white rounded-[40px] shadow-2xl p-10 animate-in zoom-in-95 duration-500">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-2xl font-black text-slate-900">Sync Progress</h2>
+              <button onClick={() => { setIsSyncModalOpen(false); setSyncError(''); setSyncSuccess(''); }} className="p-2 text-slate-400 hover:text-slate-950 transition-colors">
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-slate-600 text-sm mb-4 font-medium">
+              Sync your study progress across devices. Your data will be synced automatically.
+            </p>
+
+            <div className="mb-4 space-y-3">
+              <div className="flex items-center gap-3 p-3 bg-blue-50 rounded-2xl border border-blue-200">
+                <input
+                  type="checkbox"
+                  id="useProxy"
+                  checked={useProxy}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setUseProxy(checked);
+                    localStorage.setItem('couchdb_use_proxy', checked.toString());
+                    if (checked) {
+                      setCouchdbUrl('/couchdb');
+                      localStorage.setItem('couchdb_url', '/couchdb');
+                    }
+                  }}
+                  className="w-4 h-4 text-indigo-600 rounded focus:ring-indigo-500"
+                />
+                <label htmlFor="useProxy" className="text-xs text-blue-700 font-bold cursor-pointer flex-1">
+                  Use Vite Proxy (recommended for development - bypasses CORS)
+                </label>
+              </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 ml-1">Server URL</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={couchdbUrl}
+                    onChange={(e) => {
+                      setCouchdbUrl(e.target.value);
+                      localStorage.setItem('couchdb_url', e.target.value);
+                      if (e.target.value !== '/couchdb') {
+                        setUseProxy(false);
+                        localStorage.setItem('couchdb_use_proxy', 'false');
+                      }
+                    }}
+                    placeholder={useProxy ? "/couchdb" : "http://localhost:5984"}
+                    disabled={useProxy}
+                    className="flex-1 h-12 px-4 bg-slate-50 border-2 border-slate-100 rounded-2xl outline-none focus:border-slate-950 transition-all font-bold text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  />
+                  <button
+                    onClick={async () => {
+                      setIsSyncing(true);
+                      setSyncError('');
+                      try {
+                      const { testConnection, setCouchDBUrl } = await import('./services/couchdbSync');
+                      setCouchDBUrl(couchdbUrl);
+                      const result = await testConnection(couchdbUrl);
+                      if (result.ok) {
+                        setSyncSuccess('Connection successful!');
+                        setTimeout(() => setSyncSuccess(''), 2000);
+                      } else {
+                        setSyncError(result.error || 'Connection failed');
+                      }
+                    } catch (err: any) {
+                      setSyncError(err.message || 'Connection test failed');
+                    } finally {
+                      setIsSyncing(false);
+                    }
+                  }}
+                    disabled={isSyncing}
+                    className="px-4 h-12 bg-slate-100 text-slate-950 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-200 active:scale-95 transition-all disabled:opacity-50"
+                  >
+                    Test
+                  </button>
+                </div>
+                {useProxy && (
+                  <p className="text-[10px] text-slate-500 font-medium">
+                    Using Vite proxy at /couchdb → http://localhost:5984 (bypasses CORS)
+                  </p>
+                )}
+              </div>
+            </div>
+
+            {syncError && (
+              <div className="mb-4 p-4 bg-red-50 text-red-600 rounded-2xl text-xs font-bold border border-red-100 flex items-center gap-3">
+                <AlertCircle className="w-4 h-4" />
+                {syncError}
+              </div>
+            )}
+
+            {syncSuccess && (
+              <div className="mb-4 p-4 bg-emerald-50 text-emerald-600 rounded-2xl text-xs font-bold border border-emerald-100 flex items-center gap-3">
+                <CheckCircle className="w-4 h-4" />
+                {syncSuccess}
+              </div>
+            )}
+
+            <div className="space-y-3">
+              <div className="p-4 bg-indigo-50 rounded-2xl border border-indigo-200 mb-4">
+                <p className="text-xs text-indigo-700 font-bold mb-1">Cloud Sync</p>
+                <p className="text-xs text-indigo-600">Sync your progress across all devices</p>
+              </div>
+              <button
+                onClick={handleSyncUpload}
+                disabled={isSyncing}
+                className="w-full flex items-center justify-center gap-3 p-5 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest text-xs shadow-lg hover:bg-indigo-700 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isSyncing ? (
+                  <>
+                    <Activity className="w-5 h-5 animate-spin" />
+                    Syncing...
+                  </>
+                    ) : (
+                      <>
+                        <CloudUpload className="w-5 h-5" />
+                        Upload to Cloud
+                      </>
+                    )}
+              </button>
+              <button
+                onClick={handleSyncDownload}
+                disabled={isSyncing}
+                className="w-full flex items-center justify-center gap-3 p-5 bg-slate-100 text-slate-950 rounded-2xl font-black uppercase tracking-widest text-xs shadow-sm hover:bg-slate-200 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isSyncing ? (
+                  <>
+                    <Activity className="w-5 h-5 animate-spin" />
+                    Syncing...
+                  </>
+                    ) : (
+                      <>
+                        <CloudDownload className="w-5 h-5" />
+                        Download from Cloud
+                      </>
+                    )}
+              </button>
+
+              <div className="border-t border-slate-200 pt-4 mt-4">
+                <p className="text-xs text-slate-400 font-bold uppercase tracking-widest mb-3 text-center">File Transfer</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={handleExportFile}
+                    disabled={isSyncing}
+                    className="flex items-center justify-center gap-2 p-4 bg-white border-2 border-slate-200 text-slate-950 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-50 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Download className="w-4 h-4" />
+                    Export
+                  </button>
+                  <button
+                    onClick={handleImportFile}
+                    disabled={isSyncing}
+                    className="flex items-center justify-center gap-2 p-4 bg-white border-2 border-slate-200 text-slate-950 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-50 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Upload className="w-4 h-4" />
+                    Import
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       <style>{`

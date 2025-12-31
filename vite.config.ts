@@ -9,6 +9,20 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 3000,
         host: '0.0.0.0',
+        proxy: {
+          '/couchdb': {
+            target: 'http://localhost:5984',
+            changeOrigin: true,
+            rewrite: (path) => path.replace(/^\/couchdb/, ''),
+            configure: (proxy, _options) => {
+              proxy.on('proxyReq', (proxyReq, req, _res) => {
+                // Add Basic Auth header
+                const auth = Buffer.from('admin:P@55w0rd!').toString('base64');
+                proxyReq.setHeader('Authorization', `Basic ${auth}`);
+              });
+            },
+          },
+        },
       },
       plugins: [react()],
       define: {
