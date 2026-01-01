@@ -20,6 +20,11 @@ import { BookmarksView } from './components/BookmarksView';
 import * as dbService from './services/db';
 import * as syncService from './services/syncService';
 
+// TODO: Replace with your actual Cloud CouchDB URL (e.g., https://apikey:pass@user.cloudant.com)
+// If you leave this empty, the user will be prompted to enter it manually on the deployed site.
+// NOTE: http://192.168.1.248:5984 will work on Mobile/LAN, but will fail on GitHub Pages (HTTPS) due to security.
+const DEFAULT_CLOUD_URL = 'http://192.168.1.248:5984';
+
 const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [loginModalState, setLoginModalState] = useState<{ isOpen: boolean; provider: AIProvider | null }>({ isOpen: false, provider: null });
@@ -32,6 +37,12 @@ const App: React.FC = () => {
   const [couchdbUrl, setCouchdbUrl] = useState(() => {
     const stored = localStorage.getItem('couchdb_url');
     if (stored) return stored;
+
+    // If on HTTPS (e.g. GitHub Pages), default to Cloud URL if available
+    if (typeof window !== 'undefined' && window.location.protocol === 'https:') {
+      return DEFAULT_CLOUD_URL;
+    }
+
     // In development, suggest using proxy
     try {
       // @ts-ignore - Vite env variable
@@ -42,8 +53,23 @@ const App: React.FC = () => {
     } catch (e) {
       // Ignore if import.meta is not available
     }
+    // If accessing via LAN IP (e.g. 192.168.x.x), default to that IP for CouchDB
+    if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.protocol === 'http:') {
+      return `http://${window.location.hostname}:5984`;
+    }
+
     return 'http://localhost:5984';
   });
+
+  // Update couchdbUrl default on mount if we are on HTTPS (don't suggest localhost)
+  useEffect(() => {
+    if (window.location.protocol === 'https:' && couchdbUrl.includes('localhost')) {
+      const stored = localStorage.getItem('couchdb_url');
+      if (!stored) {
+        setCouchdbUrl(DEFAULT_CLOUD_URL);
+      }
+    }
+  }, []);
   const [useProxy, setUseProxy] = useState(() => {
     return localStorage.getItem('couchdb_use_proxy') === 'true';
   });
@@ -150,7 +176,7 @@ const App: React.FC = () => {
 
     try {
       const { loginUser, registerUser } = await import('./services/couchdbAuth');
-      
+
       if (isLoginMode) {
         const user = await loginUser(email.trim(), password);
         localStorage.setItem('flowcards_session', user.email);
@@ -379,8 +405,8 @@ const App: React.FC = () => {
     try {
       const syncData = await syncService.exportUserData(user);
       await syncService.uploadToCloud(syncData);
-        setSyncSuccess('Progress synced to cloud successfully!');
-      
+      setSyncSuccess(`Progress synced to cloud successfully! (${syncData.decks.length} Decks, ${syncData.cardStatuses.length} Statuses)`);
+
       setTimeout(() => {
         setSyncSuccess('');
         setIsSyncModalOpen(false);
@@ -589,8 +615,8 @@ const App: React.FC = () => {
               <h2 className="text-2xl font-black tracking-tight hidden sm:block">Repository</h2>
             </div>
             <div className="flex items-center gap-4">
-              <button 
-                onClick={() => setIsSyncModalOpen(true)} 
+              <button
+                onClick={() => setIsSyncModalOpen(true)}
                 className={`p-3 rounded-2xl transition-all ${isSyncModalOpen ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-400 hover:text-indigo-600 border border-slate-200 shadow-sm'}`}
                 title="Sync Progress"
               >
@@ -865,6 +891,14 @@ const App: React.FC = () => {
                   Use Vite Proxy (recommended for development - bypasses CORS)
                 </label>
               </div>
+
+              {window.location.protocol === 'https:' && couchdbUrl.startsWith('http:') && (
+                <div className="mb-3 p-3 bg-amber-50 text-amber-700 rounded-xl text-[10px] font-bold border border-amber-100 flex gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <p>Warning: You are on a secure site (HTTPS). Connecting to an insecure server (HTTP) will likely be blocked by your browser. Use ngrok or an SSL-enabled server.</p>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <label className="text-[10px] font-black uppercase tracking-widest text-slate-400 ml-1">Server URL</label>
                 <div className="flex gap-2">
@@ -888,21 +922,21 @@ const App: React.FC = () => {
                       setIsSyncing(true);
                       setSyncError('');
                       try {
-                      const { testConnection, setCouchDBUrl } = await import('./services/couchdbSync');
-                      setCouchDBUrl(couchdbUrl);
-                      const result = await testConnection(couchdbUrl);
-                      if (result.ok) {
-                        setSyncSuccess('Connection successful!');
-                        setTimeout(() => setSyncSuccess(''), 2000);
-                      } else {
-                        setSyncError(result.error || 'Connection failed');
+                        const { testConnection, setCouchDBUrl } = await import('./services/couchdbSync');
+                        setCouchDBUrl(couchdbUrl);
+                        const result = await testConnection(couchdbUrl);
+                        if (result.ok) {
+                          setSyncSuccess('Connection successful!');
+                          setTimeout(() => setSyncSuccess(''), 2000);
+                        } else {
+                          setSyncError(result.error || 'Connection failed');
+                        }
+                      } catch (err: any) {
+                        setSyncError(err.message || 'Connection test failed');
+                      } finally {
+                        setIsSyncing(false);
                       }
-                    } catch (err: any) {
-                      setSyncError(err.message || 'Connection test failed');
-                    } finally {
-                      setIsSyncing(false);
-                    }
-                  }}
+                    }}
                     disabled={isSyncing}
                     className="px-4 h-12 bg-slate-100 text-slate-950 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-200 active:scale-95 transition-all disabled:opacity-50"
                   >
@@ -946,12 +980,12 @@ const App: React.FC = () => {
                     <Activity className="w-5 h-5 animate-spin" />
                     Syncing...
                   </>
-                    ) : (
-                      <>
-                        <CloudUpload className="w-5 h-5" />
-                        Upload to Cloud
-                      </>
-                    )}
+                ) : (
+                  <>
+                    <CloudUpload className="w-5 h-5" />
+                    Upload to Cloud
+                  </>
+                )}
               </button>
               <button
                 onClick={handleSyncDownload}
@@ -963,12 +997,12 @@ const App: React.FC = () => {
                     <Activity className="w-5 h-5 animate-spin" />
                     Syncing...
                   </>
-                    ) : (
-                      <>
-                        <CloudDownload className="w-5 h-5" />
-                        Download from Cloud
-                      </>
-                    )}
+                ) : (
+                  <>
+                    <CloudDownload className="w-5 h-5" />
+                    Download from Cloud
+                  </>
+                )}
               </button>
 
               <div className="border-t border-slate-200 pt-4 mt-4">

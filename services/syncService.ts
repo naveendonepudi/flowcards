@@ -26,6 +26,8 @@ export async function exportUserData(username: string): Promise<SyncData> {
     dbService.getBookmarks(username)
   ]);
 
+  console.log(`Exporting: ${decks.length} decks, ${cardStatuses.length} card statuses`);
+
   return {
     decks,
     settings,
@@ -46,7 +48,7 @@ async function getAllCardStatuses(username: string): Promise<CardStatus[]> {
   const tx = db.transaction('card_status', 'readonly');
   const store = tx.objectStore('card_status');
   const request = store.getAll();
-  
+
   return new Promise((resolve, reject) => {
     request.onsuccess = () => {
       const all = request.result as CardStatus[];
@@ -83,7 +85,7 @@ export async function importUserData(syncData: SyncData, mergeStrategy: 'replace
 
     if (syncData.settings) {
       const existingSettings = await dbService.loadSettings(username);
-      const mergedSettings = existingSettings 
+      const mergedSettings = existingSettings
         ? { ...existingSettings, ...syncData.settings }
         : syncData.settings;
       await dbService.saveSettings(username, mergedSettings);
@@ -101,12 +103,12 @@ export async function importUserData(syncData: SyncData, mergeStrategy: 'replace
  */
 function mergeDecks(existing: AnkiDeck[], incoming: AnkiDeck[]): AnkiDeck[] {
   const deckMap = new Map<number, AnkiDeck>();
-  
+
   // Add existing decks
   existing.forEach(deck => {
     deckMap.set(deck.id, { ...deck });
   });
-  
+
   // Merge incoming decks
   incoming.forEach(incomingDeck => {
     const existingDeck = deckMap.get(incomingDeck.id);
@@ -124,7 +126,7 @@ function mergeDecks(existing: AnkiDeck[], incoming: AnkiDeck[]): AnkiDeck[] {
       deckMap.set(incomingDeck.id, { ...incomingDeck });
     }
   });
-  
+
   return Array.from(deckMap.values());
 }
 
@@ -135,7 +137,7 @@ async function replaceStudyLogs(username: string, logs: StudyLog[]): Promise<voi
   const db = await dbService.initDB();
   const tx = db.transaction('study_logs', 'readwrite');
   const store = tx.objectStore('study_logs');
-  
+
   // Delete existing logs for this user
   const getAllRequest = store.getAll();
   await new Promise<void>((resolve, reject) => {
@@ -148,10 +150,10 @@ async function replaceStudyLogs(username: string, logs: StudyLog[]): Promise<voi
     };
     getAllRequest.onerror = () => reject(getAllRequest.error);
   });
-  
+
   // Add new logs
   logs.forEach(log => store.put(log));
-  
+
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
@@ -164,9 +166,9 @@ async function replaceStudyLogs(username: string, logs: StudyLog[]): Promise<voi
 async function mergeStudyLogs(username: string, logs: StudyLog[]): Promise<void> {
   const existingLogs = await dbService.getStudyLogs(username);
   const logMap = new Map<string, StudyLog>();
-  
+
   existingLogs.forEach(log => logMap.set(log.date, log));
-  
+
   logs.forEach(log => {
     const existing = logMap.get(log.date);
     if (existing) {
@@ -177,7 +179,7 @@ async function mergeStudyLogs(username: string, logs: StudyLog[]): Promise<void>
       logMap.set(log.date, log);
     }
   });
-  
+
   await replaceStudyLogs(username, Array.from(logMap.values()));
 }
 
@@ -188,7 +190,7 @@ async function replaceCardStatuses(username: string, statuses: CardStatus[]): Pr
   const db = await dbService.initDB();
   const tx = db.transaction('card_status', 'readwrite');
   const store = tx.objectStore('card_status');
-  
+
   // Delete existing statuses for this user
   const getAllRequest = store.getAll();
   await new Promise<void>((resolve, reject) => {
@@ -201,10 +203,10 @@ async function replaceCardStatuses(username: string, statuses: CardStatus[]): Pr
     };
     getAllRequest.onerror = () => reject(getAllRequest.error);
   });
-  
+
   // Add new statuses
   statuses.forEach(status => store.put(status));
-  
+
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
@@ -217,12 +219,12 @@ async function replaceCardStatuses(username: string, statuses: CardStatus[]): Pr
 async function mergeCardStatuses(username: string, statuses: CardStatus[]): Promise<void> {
   const existingStatuses = await getAllCardStatuses(username);
   const statusMap = new Map<string, CardStatus>();
-  
+
   existingStatuses.forEach(status => {
     const key = `${status.deckId}-${status.cardId}`;
     statusMap.set(key, status);
   });
-  
+
   statuses.forEach(status => {
     const key = `${status.deckId}-${status.cardId}`;
     const existing = statusMap.get(key);
@@ -242,7 +244,7 @@ async function mergeCardStatuses(username: string, statuses: CardStatus[]): Prom
       statusMap.set(key, status);
     }
   });
-  
+
   await replaceCardStatuses(username, Array.from(statusMap.values()));
 }
 
@@ -255,14 +257,14 @@ async function replaceBookmarkFolders(folders: BookmarkFolder[]): Promise<void> 
   const db = await dbService.initDB();
   const tx = db.transaction('bookmark_folders', 'readwrite');
   const store = tx.objectStore('bookmark_folders');
-  
+
   // Delete existing folders for this user only
   const existingFolders = await dbService.getFolders(username);
   existingFolders.forEach(folder => store.delete(folder.id));
-  
+
   // Add new folders
   folders.forEach(folder => store.put(folder));
-  
+
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
@@ -277,10 +279,10 @@ async function mergeBookmarkFolders(folders: BookmarkFolder[]): Promise<void> {
   const username = folders[0].username;
   const existingFolders = await dbService.getFolders(username);
   const folderMap = new Map<string, BookmarkFolder>();
-  
+
   existingFolders.forEach(folder => folderMap.set(folder.id, folder));
   folders.forEach(folder => folderMap.set(folder.id, folder));
-  
+
   await replaceBookmarkFolders(Array.from(folderMap.values()));
 }
 
@@ -293,14 +295,14 @@ async function replaceBookmarks(bookmarks: Bookmark[]): Promise<void> {
   const db = await dbService.initDB();
   const tx = db.transaction('bookmarks', 'readwrite');
   const store = tx.objectStore('bookmarks');
-  
+
   // Delete existing bookmarks for this user only
   const existingBookmarks = await dbService.getBookmarks(username);
   existingBookmarks.forEach(bookmark => store.delete(bookmark.id));
-  
+
   // Add new bookmarks
   bookmarks.forEach(bookmark => store.put(bookmark));
-  
+
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
@@ -315,9 +317,9 @@ async function mergeBookmarks(bookmarks: Bookmark[]): Promise<void> {
   const username = bookmarks[0].username;
   const existingBookmarks = await dbService.getBookmarks(username);
   const bookmarkMap = new Map<string, Bookmark>();
-  
+
   existingBookmarks.forEach(bookmark => bookmarkMap.set(bookmark.id, bookmark));
-  
+
   bookmarks.forEach(bookmark => {
     const existing = bookmarkMap.get(bookmark.id);
     if (existing) {
@@ -327,7 +329,7 @@ async function mergeBookmarks(bookmarks: Bookmark[]): Promise<void> {
       bookmarkMap.set(bookmark.id, bookmark);
     }
   });
-  
+
   await replaceBookmarks(Array.from(bookmarkMap.values()));
 }
 
