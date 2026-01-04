@@ -16,7 +16,8 @@ function getCouchDBUrl(): string {
   }
 
   // In development, try to use Vite proxy if available
-  if (import.meta.env.DEV) {
+  const isDev = (import.meta as any).env?.DEV;
+  if (isDev) {
     const useProxy = localStorage.getItem('couchdb_use_proxy') === 'true';
     if (useProxy) {
       return '/couchdb';
@@ -252,6 +253,7 @@ export async function uploadSyncData(syncData: SyncData): Promise<void> {
   await ensureDatabaseExists();
 
   const sanitizedUsername = syncData.username.toLowerCase().replace(/[^a-z0-9]/g, '_');
+  const allActiveDocIds = new Set<string>();
 
   // 1. Upload each deck as a separate document (or chunks if too large)
   const deckIds: number[] = [];
@@ -267,6 +269,7 @@ export async function uploadSyncData(syncData: SyncData): Promise<void> {
 
     if (deckJson.length < TARGET_CHUNK_SIZE) {
       // Small enough, upload as single document
+      allActiveDocIds.add(deckDocId);
       await uploadDocument(deckDocId, {
         username: syncData.username,
         type: 'deck',
@@ -288,6 +291,7 @@ export async function uploadSyncData(syncData: SyncData): Promise<void> {
 
         const chunkId = `deck_chunk_${sanitizedUsername}_${deck.id}_${chunkIndex}`;
         chunkIds.push(chunkId);
+        allActiveDocIds.add(chunkId);
 
         await uploadDocument(chunkId, {
           username: syncData.username,
@@ -330,6 +334,7 @@ export async function uploadSyncData(syncData: SyncData): Promise<void> {
       }
 
       // Upload master deck document with empty cards array but referencing chunks
+      allActiveDocIds.add(deckDocId);
       await uploadDocument(deckDocId, {
         username: syncData.username,
         type: 'deck',
@@ -345,6 +350,8 @@ export async function uploadSyncData(syncData: SyncData): Promise<void> {
 
   // 2. Upload manifest document with the rest of the data
   const manifestId = `user_${sanitizedUsername}`;
+  allActiveDocIds.add(manifestId); // Manifest is active!
+
   const manifestData = {
     username: syncData.username,
     type: 'manifest',
@@ -359,13 +366,66 @@ export async function uploadSyncData(syncData: SyncData): Promise<void> {
     lastSynced: new Date().toISOString()
   };
 
-  // Hash the manifest content (excluding volatile fields if any)
+  // Hash the manifest content
   const manifestHash = computeHash(JSON.stringify(manifestData));
 
   await uploadDocument(manifestId, {
     ...manifestData,
+    deletedItems: syncData.deletedItems, // IMPORTANT: Save tombstones to cloud!
     contentHash: manifestHash
   });
+
+  // 3. Cleanup: Remove documents that are no longer in the manifest (deleted decks/chunks)
+  try {
+    const url = getCouchDBUrl();
+    const dbUrl = `${url}/${COUCHDB_DB_NAME}`;
+
+    // We need to find all possible documents related to this user.
+    // Range "deck_" to "deck_\ufff0" covers all types starting with "deck_" for all users,
+    // which we then filter by sanitizedUsername inside each ID.
+    const startKey = JSON.stringify(`deck_`);
+    const endKey = JSON.stringify(`deck_\ufff0`);
+
+    const viewUrl = `${dbUrl}/_all_docs?startkey=${encodeURIComponent(startKey)}&endkey=${encodeURIComponent(endKey)}`;
+
+    const response = await fetch(viewUrl, {
+      method: 'GET',
+      headers: getAuthHeaders()
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const existingDocs = data.rows || [];
+
+      const docsToDelete = existingDocs.filter((row: any) => {
+        const id = row.id;
+        if (id === manifestId) return false;
+
+        // Match only documents belonging to THIS user
+        const isDeckDoc = id.startsWith(`deck_${sanitizedUsername}_`);
+        const isChunkDoc = id.startsWith(`deck_chunk_${sanitizedUsername}_`);
+
+        if ((isDeckDoc || isChunkDoc) && !allActiveDocIds.has(id)) {
+          return true;
+        }
+        return false;
+      });
+
+      if (docsToDelete.length > 0) {
+        console.log(`Cleaning up ${docsToDelete.length} orphaned cloud documents for ${sanitizedUsername}...`);
+        for (const row of docsToDelete) {
+          console.log(`Deleting cloud document: ${row.id}`);
+          const deleteUrl = `${dbUrl}/${row.id}?rev=${row.value.rev}`;
+          await fetch(deleteUrl, {
+            method: 'DELETE',
+            headers: getAuthHeaders()
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Cloud cleanup failed (non-critical):", err);
+  }
 }
 
 /**
@@ -443,6 +503,7 @@ export async function downloadSyncData(username: string): Promise<SyncData | nul
         cardStatuses: manifest.cardStatuses,
         bookmarkFolders: manifest.bookmarkFolders,
         bookmarks: manifest.bookmarks,
+        deletedItems: manifest.deletedItems || [], // CRITICAL: Include tombstones from cloud!
         syncTimestamp: manifest.syncTimestamp
       } as SyncData;
     } else {

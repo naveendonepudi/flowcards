@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { ChevronLeft, Search, CheckCircle2, PlayCircle, BookOpen, Clock, Calendar, Plus } from 'lucide-react';
+import { ChevronLeft, Search, CheckCircle2, PlayCircle, BookOpen, Clock, Calendar, Plus, Trash2 } from 'lucide-react';
 import { AnkiDeck, AnkiCard, CardStatus } from '../types';
 import { CreateCardModal } from './CreateCardModal';
 
@@ -10,9 +10,10 @@ interface DeckDetailViewProps {
   onBack: () => void;
   onStudyCard: (index: number) => void;
   onAddCard: (card: Omit<AnkiCard, 'id' | 'noteId' | 'deckId' | 'ord'>) => Promise<void>;
+  onDeleteCard: (deckId: number, cardId: number) => Promise<void>;
 }
 
-export const DeckDetailView: React.FC<DeckDetailViewProps> = ({ deck, cardStatuses, onBack, onStudyCard, onAddCard }) => {
+export const DeckDetailView: React.FC<DeckDetailViewProps> = ({ deck, cardStatuses, onBack, onStudyCard, onAddCard, onDeleteCard }) => {
   const [search, setSearch] = useState('');
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
 
@@ -101,14 +102,16 @@ export const DeckDetailView: React.FC<DeckDetailViewProps> = ({ deck, cardStatus
               const originalIdx = deck.cards.findIndex(c => c.id === card.id);
 
               return (
-                <button
+                <div
                   key={card.id}
-                  onClick={() => onStudyCard(originalIdx)}
-                  className={`group w-full flex items-center justify-between p-6 rounded-[28px] border-2 transition-all active:scale-[0.98] text-left hover:border-slate-200 hover:shadow-md
+                  className={`group w-full flex items-center justify-between p-6 rounded-[28px] border-2 transition-all text-left hover:border-slate-200 hover:shadow-md
                     ${statusInfo.label === 'Done' ? 'bg-emerald-50/20' : 'bg-white border-slate-50'}
                   `}
                 >
-                  <div className="flex items-center gap-5 overflow-hidden">
+                  <button
+                    onClick={() => onStudyCard(originalIdx)}
+                    className="flex-1 flex items-center gap-5 overflow-hidden text-left"
+                  >
                     <div className={`p-3 rounded-2xl shrink-0 ${statusInfo.bg} ${statusInfo.color}`}>
                       <statusInfo.icon className="w-5 h-5" />
                     </div>
@@ -121,11 +124,22 @@ export const DeckDetailView: React.FC<DeckDetailViewProps> = ({ deck, cardStatus
                         {statusInfo.label}
                       </span>
                     </div>
-                  </div>
-                  <div className="shrink-0 flex items-center gap-2">
+                  </button>
+
+                  <div className="shrink-0 flex items-center gap-3">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteCard(deck.id, card.id);
+                      }}
+                      className="p-3 text-slate-200 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all opacity-0 group-hover:opacity-100"
+                      title="Delete Card"
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
                     <BookOpen className="w-4 h-4 text-slate-200 group-hover:text-slate-950" />
                   </div>
-                </button>
+                </div>
               );
             })
           )}

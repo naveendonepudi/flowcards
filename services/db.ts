@@ -8,14 +8,15 @@ const LOGS_STORE = 'study_logs';
 const STATUS_STORE = 'card_status';
 const FOLDERS_STORE = 'bookmark_folders';
 const BOOKMARKS_STORE = 'bookmarks';
-const DB_VERSION = 7;
+const DELETED_ITEMS_STORE = 'deleted_items';
+const DB_VERSION = 8;
 
 export async function initDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = (event: any) => {
       const db = request.result;
-      
+
       if (!db.objectStoreNames.contains(DECKS_STORE)) {
         db.createObjectStore(DECKS_STORE, { keyPath: ['username', 'id'] });
       }
@@ -34,6 +35,9 @@ export async function initDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(BOOKMARKS_STORE)) {
         db.createObjectStore(BOOKMARKS_STORE, { keyPath: 'id' });
       }
+      if (!db.objectStoreNames.contains(DELETED_ITEMS_STORE)) {
+        db.createObjectStore(DELETED_ITEMS_STORE, { keyPath: ['username', 'type', 'id'] });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
@@ -44,22 +48,22 @@ export async function scheduleReview(username: string, deckId: number, cardId: n
   const db = await initDB();
   const tx = db.transaction(STATUS_STORE, 'readwrite');
   const store = tx.objectStore(STATUS_STORE);
-  
+
   let nextReviewAt: number | undefined;
-  
+
   if (intervalDays !== -1) {
     const offset = intervalDays === 0 ? 0 : (intervalDays * 24 * 60 * 60 * 1000);
     nextReviewAt = Date.now() + offset;
   }
-  
-  store.put({ 
-    username, 
-    deckId, 
-    cardId, 
-    status: intervalDays === -1 ? 'completed' : 'new', 
-    nextReviewAt 
+
+  store.put({
+    username,
+    deckId,
+    cardId,
+    status: intervalDays === -1 ? 'completed' : 'new',
+    nextReviewAt
   });
-  
+
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
@@ -71,21 +75,21 @@ export async function getDueCards(username: string, allDecks: AnkiDeck[]): Promi
   const tx = db.transaction(STATUS_STORE, 'readonly');
   const store = tx.objectStore(STATUS_STORE);
   const request = store.getAll();
-  
+
   return new Promise((resolve, reject) => {
     request.onsuccess = () => {
       const allStatus = request.result as CardStatus[];
       const now = Date.now();
-      
-      const dueStatus = allStatus.filter(s => 
-        s.username === username && 
-        s.nextReviewAt !== undefined && 
+
+      const dueStatus = allStatus.filter(s =>
+        s.username === username &&
+        s.nextReviewAt !== undefined &&
         s.nextReviewAt !== null &&
         s.nextReviewAt <= now
       );
 
       const dueCards: { card: AnkiCard, deckName: string }[] = [];
-      
+
       dueStatus.forEach(status => {
         const deck = allDecks.find(d => d.id === status.deckId);
         if (deck) {
@@ -95,7 +99,7 @@ export async function getDueCards(username: string, allDecks: AnkiDeck[]): Promi
           }
         }
       });
-      
+
       resolve(dueCards);
     };
     request.onerror = () => reject(request.error);
@@ -126,14 +130,14 @@ export async function logStudy(username: string, cardId: number): Promise<void> 
   const date = new Date().toISOString().split('T')[0];
   const tx = db.transaction(LOGS_STORE, 'readwrite');
   const store = tx.objectStore(LOGS_STORE);
-  
+
   const request = store.get([username, date]);
-  
+
   return new Promise((resolve, reject) => {
     request.onsuccess = () => {
       const existing = request.result as StudyLog | undefined;
       const cardIds = existing ? [...existing.cardIds] : [];
-      
+
       if (!cardIds.includes(cardId)) {
         cardIds.push(cardId);
         store.put({ username, date, cardIds });
@@ -149,7 +153,7 @@ export async function getStudyLogs(username: string): Promise<StudyLog[]> {
   const tx = db.transaction(LOGS_STORE, 'readonly');
   const store = tx.objectStore(LOGS_STORE);
   const request = store.getAll();
-  
+
   return new Promise((resolve, reject) => {
     request.onsuccess = () => {
       const all = request.result as StudyLog[];
@@ -168,12 +172,12 @@ export async function markCardAsRead(username: string, deckId: number, cardId: n
   return new Promise((resolve, reject) => {
     getReq.onsuccess = () => {
       const existing = getReq.result;
-      store.put({ 
-        username, 
-        deckId, 
-        cardId, 
+      store.put({
+        username,
+        deckId,
+        cardId,
         status: existing?.status || 'new',
-        nextReviewAt: existing?.nextReviewAt 
+        nextReviewAt: existing?.nextReviewAt
       });
       resolve();
     };
@@ -222,10 +226,13 @@ export async function loadDecks(username: string): Promise<AnkiDeck[]> {
 
 export async function deleteDeck(username: string, deckId: number): Promise<void> {
   const db = await initDB();
-  const txDeck = db.transaction(DECKS_STORE, 'readwrite');
-  txDeck.objectStore(DECKS_STORE).delete([username, deckId]);
-  const txStatus = db.transaction(STATUS_STORE, 'readwrite');
-  const statusStore = txStatus.objectStore(STATUS_STORE);
+  const tx = db.transaction([DECKS_STORE, STATUS_STORE, DELETED_ITEMS_STORE], 'readwrite');
+
+  // 1. Delete the deck
+  tx.objectStore(DECKS_STORE).delete([username, deckId]);
+
+  // 2. Delete associated statuses
+  const statusStore = tx.objectStore(STATUS_STORE);
   const request = statusStore.getAll();
   request.onsuccess = () => {
     const statuses = request.result as CardStatus[];
@@ -235,12 +242,45 @@ export async function deleteDeck(username: string, deckId: number): Promise<void
       }
     });
   };
+
+  // 3. Record tombstone
+  tx.objectStore(DELETED_ITEMS_STORE).put({ username, type: 'deck', id: deckId, deletedAt: Date.now() });
+
   return new Promise((resolve, reject) => {
-    txDeck.oncomplete = () => { txStatus.oncomplete = () => resolve(); };
-    txDeck.onerror = () => reject(txDeck.error);
-    txStatus.onerror = () => reject(txStatus.error);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
   });
 }
+
+
+export async function deleteCard(username: string, deckId: number, cardId: number): Promise<void> {
+  const db = await initDB();
+  const tx = db.transaction([DECKS_STORE, STATUS_STORE, DELETED_ITEMS_STORE], 'readwrite');
+
+  // 1. Load the deck and remove the card
+  const deckStore = tx.objectStore(DECKS_STORE);
+  const getDeckRequest = deckStore.get([username, deckId]);
+
+  getDeckRequest.onsuccess = () => {
+    const deck = getDeckRequest.result as AnkiDeck;
+    if (deck) {
+      deck.cards = deck.cards.filter(c => c.id !== cardId);
+      deckStore.put({ ...deck, username });
+    }
+  };
+
+  // 2. Delete the specific status
+  tx.objectStore(STATUS_STORE).delete([username, deckId, cardId]);
+
+  // 3. Record tombstone
+  tx.objectStore(DELETED_ITEMS_STORE).put({ username, type: 'card', id: cardId, deletedAt: Date.now() });
+
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 
 export async function saveSettings(username: string, settings: AISettings): Promise<void> {
   const db = await initDB();
@@ -289,16 +329,26 @@ export async function saveFolder(folder: BookmarkFolder): Promise<void> {
   });
 }
 
-export async function deleteFolder(folderId: string): Promise<void> {
+export async function deleteFolder(username: string, folderId: string): Promise<void> {
   const db = await initDB();
-  const tx = db.transaction([FOLDERS_STORE, BOOKMARKS_STORE], 'readwrite');
+  const tx = db.transaction([FOLDERS_STORE, BOOKMARKS_STORE, DELETED_ITEMS_STORE], 'readwrite');
+
+  // 1. Delete folder
   tx.objectStore(FOLDERS_STORE).delete(folderId);
+
+  // 2. Record tombstone
+  tx.objectStore(DELETED_ITEMS_STORE).put({ username, type: 'bookmark', id: folderId, deletedAt: Date.now() });
+
+  // 3. Delete child bookmarks
   const bookmarkStore = tx.objectStore(BOOKMARKS_STORE);
   const bookmarksRequest = bookmarkStore.getAll();
   bookmarksRequest.onsuccess = () => {
     const bookmarks = bookmarksRequest.result as Bookmark[];
-    bookmarks.filter(b => b.folderId === folderId).forEach(b => bookmarkStore.delete(b.id));
+    bookmarks.filter(b => b.folderId === folderId && b.username === username).forEach(b => {
+      bookmarkStore.delete(b.id);
+    });
   };
+
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
@@ -331,13 +381,81 @@ export async function saveBookmark(bookmark: Bookmark): Promise<void> {
   });
 }
 
-export async function deleteBookmark(bookmarkId: string): Promise<void> {
+export async function deleteBookmark(username: string, bookmarkId: string): Promise<void> {
   const db = await initDB();
-  const tx = db.transaction(BOOKMARKS_STORE, 'readwrite');
-  const store = tx.objectStore(BOOKMARKS_STORE);
-  store.delete(bookmarkId);
+  const tx = db.transaction([BOOKMARKS_STORE, DELETED_ITEMS_STORE], 'readwrite');
+
+  // 1. Delete bookmark
+  tx.objectStore(BOOKMARKS_STORE).delete(bookmarkId);
+
+  // 2. Record tombstone
+  tx.objectStore(DELETED_ITEMS_STORE).put({ username, type: 'bookmark', id: bookmarkId, deletedAt: Date.now() });
+
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
 }
+
+export async function markAsDeleted(username: string, type: 'deck' | 'card' | 'bookmark', id: string | number): Promise<void> {
+  const db = await initDB();
+  const tx = db.transaction(DELETED_ITEMS_STORE, 'readwrite');
+  const store = tx.objectStore(DELETED_ITEMS_STORE);
+  store.put({ username, type, id, deletedAt: Date.now() });
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getDeletedItems(username: string): Promise<{ type: string, id: string | number, deletedAt: number }[]> {
+  const db = await initDB();
+  const tx = db.transaction(DELETED_ITEMS_STORE, 'readonly');
+  const store = tx.objectStore(DELETED_ITEMS_STORE);
+  const request = store.getAll();
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => {
+      const all = request.result as any[];
+      resolve(all.filter(item => item.username === username));
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function clearDeletedItems(username: string): Promise<void> {
+  const db = await initDB();
+  const tx = db.transaction(DELETED_ITEMS_STORE, 'readwrite');
+  const store = tx.objectStore(DELETED_ITEMS_STORE);
+  const request = store.getAll();
+  request.onsuccess = () => {
+    const all = request.result as any[];
+    all.filter(item => item.username === username).forEach(item => {
+      store.delete([username, item.type, item.id]);
+    });
+  };
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function pruneDeletedItems(username: string, maxAgeDays: number = 30): Promise<void> {
+  const db = await initDB();
+  const tx = db.transaction(DELETED_ITEMS_STORE, 'readwrite');
+  const store = tx.objectStore(DELETED_ITEMS_STORE);
+  const request = store.getAll();
+  const now = Date.now();
+  const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
+
+  request.onsuccess = () => {
+    const all = request.result as any[];
+    all.filter(item => item.username === username && (now - item.deletedAt) > maxAgeMs).forEach(item => {
+      store.delete([username, item.type, item.id]);
+    });
+  };
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+

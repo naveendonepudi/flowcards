@@ -6,7 +6,7 @@ import {
   BarChart2, Bookmark, BookmarkPlus, Clock, CalendarCheck, Zap, ListFilter, Play,
   LayoutGrid, ClipboardList, CheckCircle, PartyPopper, CheckCircle2, Check, ArrowLeft,
   FastForward, ShieldCheck, Stars, RefreshCw, Cloud, CloudUpload, CloudDownload, Download, Upload,
-  Mail, Lock, Eye, EyeOff
+  Mail, Lock, Eye, EyeOff, Settings
 } from 'lucide-react';
 import { AnkiDeck, AppState, AnkiCard, AIProvider, AISettings, CardStatus } from './types';
 import { parseAnkiFile } from './services/ankiParser';
@@ -229,9 +229,11 @@ const App: React.FC = () => {
     if (!window.confirm("Delete permanently from this device? This will also clear study history for this deck.")) return;
     try {
       await dbService.deleteDeck(user, deckId);
-      const remainingDecks = state.decks.filter(d => d.id !== deckId);
-      setState(prev => ({ ...prev, decks: remainingDecks }));
-      await refreshDueCards(user, remainingDecks);
+      setState(prev => {
+        const remainingDecks = prev.decks.filter(d => d.id !== deckId);
+        refreshDueCards(user, remainingDecks);
+        return { ...prev, decks: remainingDecks };
+      });
     } catch (err) {
       console.error("Deletion failed:", err);
       alert("Failed to delete deck from database.");
@@ -394,7 +396,84 @@ const App: React.FC = () => {
     }
   };
 
+  const handleDeleteCard = useCallback(async (deckId: number, cardId: number) => {
+    const user = localStorage.getItem('flowcards_session');
+    if (!user) return;
+    if (!window.confirm("Delete this card from the deck?")) return;
+
+    try {
+      await dbService.deleteCard(user, deckId, cardId);
+
+      setState(prev => {
+        if (!prev.selectedDeck || prev.selectedDeck.id !== deckId) return prev;
+
+        const updatedDeck = {
+          ...prev.selectedDeck,
+          cards: prev.selectedDeck.cards.filter(c => c.id !== cardId)
+        };
+
+        return {
+          ...prev,
+          selectedDeck: updatedDeck,
+          decks: prev.decks.map(d => d.id === deckId ? updatedDeck : d)
+        };
+      });
+    } catch (err) {
+      console.error("Failed to delete card:", err);
+      alert("Failed to delete card from database.");
+    }
+  }, []);
+
+  const handleSmartSync = async () => {
+    const user = localStorage.getItem('flowcards_session');
+    if (!user) return;
+
+    // Prevent double clicking
+    if (isSyncing) return;
+
+    setIsSyncing(true);
+    setSyncError('');
+    setSyncSuccess(''); // Clear previous success messages
+
+    try {
+      // 1. Download from Cloud
+      const cloudData = await syncService.downloadFromCloud(user);
+
+      if (cloudData) {
+        // 2. Import & Merge
+        await syncService.importUserData(cloudData, 'merge');
+        // Refresh local state
+        await syncAllData(user);
+      } else {
+        console.log('No existing cloud data found. Proceeding to upload first version.');
+      }
+
+      // 3. Export merged data
+      const mergedData = await syncService.exportUserData(user);
+
+      // 4. Upload to Cloud
+      await syncService.uploadToCloud(mergedData);
+
+      // 5. Prune old local tombstones (keep them for 30 days to ensure other devices see them)
+      await dbService.pruneDeletedItems(user, 30);
+
+      setSyncSuccess('Sync completed successfully!');
+      setTimeout(() => setSyncSuccess(''), 3000);
+
+    } catch (err: any) {
+      console.error("Smart Sync failed:", err);
+      setSyncError(err.message || 'Sync failed. Check connection.');
+      // Keep error visible longer
+      setTimeout(() => setSyncError(''), 5000);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+
   const handleSyncUpload = async () => {
+    // Keep this for manual "Overwrite Cloud" actions if needed, or remove later.
+    // For now, repurposing to just use standard upload logic for the modal.
     const user = localStorage.getItem('flowcards_session');
     if (!user) return;
 
@@ -419,6 +498,7 @@ const App: React.FC = () => {
   };
 
   const handleSyncDownload = async () => {
+    // Keep for manual "Overwrite Local"
     const user = localStorage.getItem('flowcards_session');
     if (!user) return;
 
@@ -434,7 +514,7 @@ const App: React.FC = () => {
         return;
       }
 
-      await syncService.importUserData(syncData, 'merge');
+      await syncService.importUserData(syncData, 'replace'); // Explicit download usually implies "I want what is on server"
       await syncAllData(user);
       setSyncSuccess('Progress synced from cloud successfully!');
       setTimeout(() => {
@@ -616,11 +696,22 @@ const App: React.FC = () => {
             </div>
             <div className="flex items-center gap-4">
               <button
-                onClick={() => setIsSyncModalOpen(true)}
-                className={`p-3 rounded-2xl transition-all ${isSyncModalOpen ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-400 hover:text-indigo-600 border border-slate-200 shadow-sm'}`}
-                title="Sync Progress"
+                onClick={handleSmartSync}
+                className={`p-3 rounded-2xl transition-all relative ${isSyncing ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-400 hover:text-indigo-600 border border-slate-200 shadow-sm'}`}
+                title="Smart Sync (Pull + Merge + Push)"
+                disabled={isSyncing}
               >
-                <RefreshCw className="w-6 h-6" />
+                <RefreshCw className={`w-6 h-6 ${isSyncing ? 'animate-spin' : ''}`} />
+                {syncSuccess && (
+                  <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-emerald-500 text-white text-[10px] px-3 py-1 rounded-full whitespace-nowrap animate-in fade-in slide-in-from-bottom-2">
+                    Synced!
+                  </div>
+                )}
+                {syncError && (
+                  <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-rose-500 text-white text-[10px] px-3 py-1 rounded-full whitespace-nowrap animate-in fade-in slide-in-from-bottom-2">
+                    Failed
+                  </div>
+                )}
               </button>
               <button onClick={() => setState(prev => ({ ...prev, view: 'bookmarks' }))} className={`p-3 rounded-2xl transition-all ${state.view === 'bookmarks' ? 'bg-amber-500 text-white shadow-lg' : 'bg-white text-slate-400 hover:text-amber-600 border border-slate-200 shadow-sm'}`}><Bookmark className="w-6 h-6" /></button>
               <button onClick={() => setState(prev => ({ ...prev, view: 'analytics' }))} className={`p-3 rounded-2xl transition-all ${state.view === 'analytics' ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-400 hover:text-indigo-600 border border-slate-200 shadow-sm'}`}><BarChart2 className="w-6 h-6" /></button>
@@ -631,6 +722,7 @@ const App: React.FC = () => {
                     <div className="px-4 py-2 text-xs text-slate-600 font-bold border-b border-slate-100 mb-2">
                       {currentUserEmail}
                     </div>
+                    <button onClick={() => { setIsSyncModalOpen(true); setIsProfileMenuOpen(false); }} className="w-full flex items-center gap-3 p-4 text-slate-600 font-bold text-sm hover:bg-slate-50 rounded-2xl transition-all"><Settings className="w-5 h-5" /> Sync Settings</button>
                     <button onClick={handleLogout} className="w-full flex items-center gap-3 p-4 text-red-600 font-bold text-sm hover:bg-red-50 rounded-2xl transition-all"><LogOut className="w-5 h-5" /> Logout</button>
                   </div>
                 )}
@@ -678,6 +770,10 @@ const App: React.FC = () => {
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <button onClick={() => setIsDeckModalOpen(true)} className="group border-4 border-dashed border-slate-100 rounded-[40px] p-8 flex flex-col items-center justify-center gap-4 text-slate-300 hover:border-slate-200 hover:text-slate-400 transition-all min-h-[280px]">
+                      <div className="p-4 bg-slate-50 rounded-full group-hover:bg-slate-100 transition-colors"><Plus className="w-10 h-10" /></div>
+                      <span className="font-black uppercase tracking-widest text-xs">New Collection</span>
+                    </button>
                     {filteredDecks.map(deck => {
                       const dueInDeck = dueCountsPerDeck[deck.id] || 0;
                       return (
@@ -700,10 +796,6 @@ const App: React.FC = () => {
                         </div>
                       )
                     })}
-                    <button onClick={() => setIsDeckModalOpen(true)} className="group border-4 border-dashed border-slate-100 rounded-[40px] p-8 flex flex-col items-center justify-center gap-4 text-slate-300 hover:border-slate-200 hover:text-slate-400 transition-all min-h-[280px]">
-                      <div className="p-4 bg-slate-50 rounded-full group-hover:bg-slate-100 transition-colors"><Plus className="w-10 h-10" /></div>
-                      <span className="font-black uppercase tracking-widest text-xs">New Collection</span>
-                    </button>
                   </div>
                 )}
               </div>
@@ -717,6 +809,7 @@ const App: React.FC = () => {
               onBack={() => setState(prev => ({ ...prev, view: 'library', selectedDeck: null }))}
               onStudyCard={(index) => setState(prev => ({ ...prev, view: 'study', currentCardIndex: index, isFlipped: false, sessionReviewedCardIds: [] }))}
               onAddCard={handleAddCard}
+              onDeleteCard={handleDeleteCard}
             />
           )}
 
@@ -983,7 +1076,7 @@ const App: React.FC = () => {
                 ) : (
                   <>
                     <CloudUpload className="w-5 h-5" />
-                    Upload to Cloud
+                    Force Upload (Overwrite Cloud)
                   </>
                 )}
               </button>
@@ -1000,7 +1093,7 @@ const App: React.FC = () => {
                 ) : (
                   <>
                     <CloudDownload className="w-5 h-5" />
-                    Download from Cloud
+                    Force Download (Overwrite Local)
                   </>
                 )}
               </button>

@@ -9,6 +9,7 @@ export interface SyncData {
   cardStatuses: CardStatus[];
   bookmarkFolders: BookmarkFolder[];
   bookmarks: Bookmark[];
+  deletedItems?: { type: string, id: string | number, deletedAt: number }[];
   syncTimestamp: number;
   username: string;
 }
@@ -17,13 +18,14 @@ export interface SyncData {
  * Export all user data from IndexedDB to a syncable format
  */
 export async function exportUserData(username: string): Promise<SyncData> {
-  const [decks, settings, studyLogs, cardStatuses, folders, bookmarks] = await Promise.all([
+  const [decks, settings, studyLogs, cardStatuses, folders, bookmarks, deletedItems] = await Promise.all([
     dbService.loadDecks(username),
     dbService.loadSettings(username),
     dbService.getStudyLogs(username),
     getAllCardStatuses(username),
     dbService.getFolders(username),
-    dbService.getBookmarks(username)
+    dbService.getBookmarks(username),
+    dbService.getDeletedItems(username)
   ]);
 
   console.log(`Exporting: ${decks.length} decks, ${cardStatuses.length} card statuses`);
@@ -35,6 +37,7 @@ export async function exportUserData(username: string): Promise<SyncData> {
     cardStatuses,
     bookmarkFolders: folders,
     bookmarks,
+    deletedItems,
     syncTimestamp: Date.now(),
     username
   };
@@ -80,7 +83,7 @@ export async function importUserData(syncData: SyncData, mergeStrategy: 'replace
   } else {
     // Merge strategy: keep latest timestamps and merge data
     const existingDecks = await dbService.loadDecks(username);
-    const mergedDecks = mergeDecks(existingDecks, syncData.decks);
+    const mergedDecks = mergeDecks(existingDecks, syncData.decks, syncData.deletedItems || []);
     await dbService.saveDecks(username, mergedDecks);
 
     if (syncData.settings) {
@@ -94,36 +97,57 @@ export async function importUserData(syncData: SyncData, mergeStrategy: 'replace
     await mergeStudyLogs(username, syncData.studyLogs);
     await mergeCardStatuses(username, syncData.cardStatuses);
     await mergeBookmarkFolders(syncData.bookmarkFolders);
-    await mergeBookmarks(syncData.bookmarks);
+    await mergeBookmarks(syncData.bookmarks, syncData.deletedItems || []);
+
+    // Also merge deletedItems into local tombstone store
+    if (syncData.deletedItems && syncData.deletedItems.length > 0) {
+      for (const item of syncData.deletedItems) {
+        await dbService.markAsDeleted(username, item.type as any, item.id);
+      }
+    }
   }
 }
 
 /**
  * Merge decks: combine cards from both sources, prefer newer data
  */
-function mergeDecks(existing: AnkiDeck[], incoming: AnkiDeck[]): AnkiDeck[] {
+function mergeDecks(existing: AnkiDeck[], incoming: AnkiDeck[], deletedItems: { type: string, id: string | number }[]): AnkiDeck[] {
   const deckMap = new Map<number, AnkiDeck>();
+  const deletedDeckIds = new Set(deletedItems.filter(i => i.type === 'deck').map(i => i.id as number));
+  const deletedCardIds = new Set(deletedItems.filter(i => i.type === 'card').map(i => i.id as number));
 
   // Add existing decks
   existing.forEach(deck => {
-    deckMap.set(deck.id, { ...deck });
+    if (!deletedDeckIds.has(deck.id)) {
+      // Also filter cards in existing deck
+      const filteredCards = deck.cards.filter(card => !deletedCardIds.has(card.id));
+      deckMap.set(deck.id, { ...deck, cards: filteredCards });
+    }
   });
 
   // Merge incoming decks
   incoming.forEach(incomingDeck => {
+    if (deletedDeckIds.has(incomingDeck.id)) return;
+
     const existingDeck = deckMap.get(incomingDeck.id);
     if (existingDeck) {
-      // Merge cards: combine unique cards by ID
+      // Merge cards: combine unique cards by ID, but filter out ones marked as deleted
       const cardMap = new Map<number, typeof incomingDeck.cards[0]>();
       existingDeck.cards.forEach(card => cardMap.set(card.id, card));
-      incomingDeck.cards.forEach(card => cardMap.set(card.id, card));
+      incomingDeck.cards.forEach(card => {
+        if (!deletedCardIds.has(card.id)) {
+          cardMap.set(card.id, card);
+        }
+      });
       existingDeck.cards = Array.from(cardMap.values());
       // Update name if different (prefer incoming)
       if (incomingDeck.name !== existingDeck.name) {
         existingDeck.name = incomingDeck.name;
       }
     } else {
-      deckMap.set(incomingDeck.id, { ...incomingDeck });
+      // New deck from incoming, filter its cards
+      const filteredCards = incomingDeck.cards.filter(card => !deletedCardIds.has(card.id));
+      deckMap.set(incomingDeck.id, { ...incomingDeck, cards: filteredCards });
     }
   });
 
@@ -312,15 +336,24 @@ async function replaceBookmarks(bookmarks: Bookmark[]): Promise<void> {
 /**
  * Merge bookmarks: prefer newer bookmarks by createdAt
  */
-async function mergeBookmarks(bookmarks: Bookmark[]): Promise<void> {
-  if (bookmarks.length === 0) return;
-  const username = bookmarks[0].username;
+async function mergeBookmarks(bookmarks: Bookmark[], deletedItems: { type: string, id: string | number }[]): Promise<void> {
+  if (bookmarks.length === 0 && deletedItems.length === 0) return;
+  const username = bookmarks.length > 0 ? bookmarks[0].username : (deletedItems.length > 0 ? (deletedItems[0] as any).username : '');
+  if (!username) return;
+
   const existingBookmarks = await dbService.getBookmarks(username);
   const bookmarkMap = new Map<string, Bookmark>();
+  const deletedBookmarkIds = new Set(deletedItems.filter(i => i.type === 'bookmark').map(i => i.id as string));
 
-  existingBookmarks.forEach(bookmark => bookmarkMap.set(bookmark.id, bookmark));
+  existingBookmarks.forEach(bookmark => {
+    if (!deletedBookmarkIds.has(bookmark.id)) {
+      bookmarkMap.set(bookmark.id, bookmark);
+    }
+  });
 
   bookmarks.forEach(bookmark => {
+    if (deletedBookmarkIds.has(bookmark.id)) return;
+
     const existing = bookmarkMap.get(bookmark.id);
     if (existing) {
       // Prefer newer bookmark

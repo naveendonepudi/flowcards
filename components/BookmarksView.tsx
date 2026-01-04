@@ -40,15 +40,15 @@ export const BookmarksView: React.FC<BookmarksViewProps> = ({ username, onBack, 
   };
 
   const handleDeleteFolder = async (folderId: string) => {
-    if (window.confirm("Delete this folder and all saved cards inside?")) {
-      await dbService.deleteFolder(folderId);
+    if (username && window.confirm("Delete this folder and all saved cards inside?")) {
+      await dbService.deleteFolder(username, folderId);
       loadFolders();
       if (selectedFolder?.id === folderId) setSelectedFolder(null);
     }
   };
 
   const handleDeleteBookmark = async (bookmarkId: string) => {
-    await dbService.deleteBookmark(bookmarkId);
+    await dbService.deleteBookmark(username, bookmarkId);
     if (selectedFolder) loadBookmarks(selectedFolder.id);
   };
 
@@ -86,16 +86,16 @@ export const BookmarksView: React.FC<BookmarksViewProps> = ({ username, onBack, 
             </div>
           ) : (
             folders.map(folder => (
-              <div 
-                key={folder.id} 
+              <div
+                key={folder.id}
                 className="group relative bg-white rounded-[40px] p-8 border border-slate-100 shadow-xl shadow-slate-200/40 hover:shadow-slate-300 transition-all duration-500 overflow-hidden cursor-pointer"
                 onClick={() => setSelectedFolder(folder)}
               >
                 <div className="relative z-10 space-y-6">
                   <div className="flex justify-between items-start">
                     <div className="p-3 bg-indigo-50 text-indigo-600 rounded-2xl"><Folder className="w-6 h-6 fill-current opacity-40" /></div>
-                    <button 
-                      onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id); }} 
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id); }}
                       className="p-2 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
                     >
                       <Trash2 className="w-5 h-5" />
@@ -104,7 +104,7 @@ export const BookmarksView: React.FC<BookmarksViewProps> = ({ username, onBack, 
                   <div>
                     <h3 className="text-xl font-black text-slate-900 line-clamp-1">{folder.name}</h3>
                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-2 flex items-center gap-2">
-                       <LayoutGrid className="w-3 h-3" /> Study Collection
+                      <LayoutGrid className="w-3 h-3" /> Study Collection
                     </p>
                   </div>
                   <div className="flex items-center gap-2 text-indigo-600 font-black text-xs uppercase tracking-widest pt-2">
@@ -120,11 +120,11 @@ export const BookmarksView: React.FC<BookmarksViewProps> = ({ username, onBack, 
         <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-2 custom-scrollbar">
           {bookmarks.length === 0 ? (
             <div className="text-center py-20 bg-white rounded-[40px] border border-slate-100">
-               <p className="text-slate-400 font-bold">This folder is empty.</p>
+              <p className="text-slate-400 font-bold">This folder is empty.</p>
             </div>
           ) : (
             bookmarks.map(bookmark => (
-              <div 
+              <div
                 key={bookmark.id}
                 className="group w-full bg-white p-6 rounded-[32px] border border-slate-100 shadow-sm hover:shadow-md transition-all flex items-center justify-between"
               >
@@ -137,19 +137,19 @@ export const BookmarksView: React.FC<BookmarksViewProps> = ({ username, onBack, 
                       {new Date(bookmark.createdAt).toLocaleDateString()}
                     </span>
                   </div>
-                  <div 
+                  <div
                     className="font-bold text-slate-800 line-clamp-1 pr-8"
                     dangerouslySetInnerHTML={{ __html: bookmark.card.front.replace(/<[^>]*>?/gm, '') }}
                   />
                 </div>
                 <div className="flex items-center gap-3 shrink-0">
-                  <button 
+                  <button
                     onClick={() => handleDeleteBookmark(bookmark.id)}
                     className="p-3 text-slate-200 hover:text-red-500 hover:bg-red-50 rounded-2xl transition-all"
                   >
                     <Trash2 className="w-5 h-5" />
                   </button>
-                  <button 
+                  <button
                     onClick={() => onStudyCard(bookmark.card)}
                     className="p-3 bg-slate-950 text-white rounded-2xl hover:bg-slate-800 active:scale-90 transition-all shadow-lg"
                   >
