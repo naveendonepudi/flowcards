@@ -9,7 +9,8 @@ const STATUS_STORE = 'card_status';
 const FOLDERS_STORE = 'bookmark_folders';
 const BOOKMARKS_STORE = 'bookmarks';
 const DELETED_ITEMS_STORE = 'deleted_items';
-const DB_VERSION = 8;
+// Bumped to 9 to match existing installations which may have migrated to version 9
+const DB_VERSION = 10;
 
 export async function initDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -35,12 +36,29 @@ export async function initDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(BOOKMARKS_STORE)) {
         db.createObjectStore(BOOKMARKS_STORE, { keyPath: 'id' });
       }
-      if (!db.objectStoreNames.contains(DELETED_ITEMS_STORE)) {
+          if (!db.objectStoreNames.contains(DELETED_ITEMS_STORE)) {
         db.createObjectStore(DELETED_ITEMS_STORE, { keyPath: ['username', 'type', 'id'] });
+      }
+      // Media store for extracted media blobs (keyed by username and filename)
+      if (!db.objectStoreNames.contains('media')) {
+        db.createObjectStore('media', { keyPath: ['username', 'filename'] });
       }
     };
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    // If opening with the requested version fails because the existing DB has a higher version,
+    // gracefully retry opening without a version (which uses the current DB version). This avoids
+    // the "requested version is less than the existing version" exception for users who already
+    // upgraded their DB externally.
+    request.onerror = () => {
+      const err = request.error;
+      if (err && (err.name === 'VersionError' || (err.message && err.message.includes('less than the existing version')))) {
+        const fallbackReq = indexedDB.open(DB_NAME);
+        fallbackReq.onsuccess = () => resolve(fallbackReq.result);
+        fallbackReq.onerror = () => reject(fallbackReq.error || err);
+      } else {
+        reject(err);
+      }
+    };
   });
 }
 
@@ -397,6 +415,31 @@ export async function deleteBookmark(username: string, bookmarkId: string): Prom
   });
 }
 
+// Media helpers: save and load media blobs extracted during import
+export async function saveMedia(username: string, filename: string, blob: Blob): Promise<void> {
+  const db = await initDB();
+  const tx = db.transaction('media', 'readwrite');
+  const store = tx.objectStore('media');
+  store.put({ username, filename, blob, createdAt: Date.now() });
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getMedia(username: string, filename: string): Promise<Blob | null> {
+  const db = await initDB();
+  const tx = db.transaction('media', 'readonly');
+  const store = tx.objectStore('media');
+  const req = store.get([username, filename]);
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => {
+      const res = req.result;
+      resolve(res ? (res.blob as Blob) : null);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
 export async function markAsDeleted(username: string, type: 'deck' | 'card' | 'bookmark', id: string | number): Promise<void> {
   const db = await initDB();
   const tx = db.transaction(DELETED_ITEMS_STORE, 'readwrite');

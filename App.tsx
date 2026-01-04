@@ -17,6 +17,7 @@ import { AnalyticsView } from './components/AnalyticsView';
 import { DeckDetailView } from './components/DeckDetailView';
 import { BookmarkModal } from './components/BookmarkModal';
 import { BookmarksView } from './components/BookmarksView';
+import { UploadProgress } from './components/UploadProgress';
 import * as dbService from './services/db';
 import * as syncService from './services/syncService';
 
@@ -24,6 +25,8 @@ import * as syncService from './services/syncService';
 // If you leave this empty, the user will be prompted to enter it manually on the deployed site.
 // NOTE: http://192.168.1.248:5984 will work on Mobile/LAN, but will fail on GitHub Pages (HTTPS) due to security.
 const DEFAULT_CLOUD_URL = 'http://192.168.1.248:5984';
+// Maximum supported import file size to avoid browser OOM during parsing (in bytes)
+const MAX_IMPORT_FILE_SIZE = 600 * 1024 * 1024; // 600 MB (supports large exports up to ~500MB)
 
 const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -205,21 +208,105 @@ const App: React.FC = () => {
     setState(prev => ({ ...prev, view: 'login', decks: [], selectedDeck: null, studiedCardIds: new Set(), cardStatuses: {}, sessionReviewedCardIds: [] }));
   };
 
+  // Import progress state
+  const [importState, setImportState] = useState<{ isImporting: boolean; stage?: string; percent?: number; detail?: string; decksImported: number; isError?: boolean; errorMessage?: string; currentDeckName?: string; currentDeckIndex?: number; totalDecks?: number }>({ isImporting: false, decksImported: 0 });
+
+  // Auto-close success overlay shortly after completion so the user sees it briefly
+  React.useEffect(() => {
+    if (importState.stage === 'complete') {
+      const t = setTimeout(() => setImportState(prev => ({ ...prev, isImporting: false, stage: undefined })), 1400);
+      return () => clearTimeout(t);
+    }
+  }, [importState.stage]);
+
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     const user = localStorage.getItem('flowcards_session');
     if (!file || !user) return;
 
-    setState(prev => ({ ...prev, isLoading: true }));
+    // Quick pre-check for file size to avoid crashing the page when a very large file is selected
+    if (file.size > MAX_IMPORT_FILE_SIZE) {
+      const sizeMb = (file.size / 1024 / 1024).toFixed(1);
+      const maxMb = (MAX_IMPORT_FILE_SIZE / 1024 / 1024).toString();
+      const msg = `File too large (${sizeMb} MB). Maximum supported import size is ${maxMb} MB. Try splitting the export in Anki or import on the desktop app.`;
+      setImportState({ isImporting: false, stage: 'error', percent: 100, detail: msg, decksImported: 0, isError: true, errorMessage: msg });
+      setState(prev => ({ ...prev, error: 'Import failed. File too large.' }));
+      return;
+    }
+
+    // Reset import state (do not flip global isLoading so UploadProgress overlay can be shown)
+    setImportState({ isImporting: true, stage: 'starting', percent: 0, detail: '', decksImported: 0, isError: false });
+
     try {
-      const parsedDecks = await parseAnkiFile(file);
-      await dbService.saveDecks(user, parsedDecks);
-      const updatedDecks = await dbService.loadDecks(user);
-      setState(prev => ({ ...prev, decks: updatedDecks, isLoading: false }));
-      await refreshDueCards(user, updatedDecks);
+      // onProgress receives stage, percent, detail
+      const onProgress = (stage: string, percent: number, detail?: string) => {
+        // Enhanced parsing: detect "Processing deck X/Y: Name" pattern to surface deck-level data in UI
+        let currentDeckName: string | undefined = undefined;
+        let currentDeckIndex: number | undefined = undefined;
+        let totalDecks: number | undefined = undefined;
+
+        if (detail && detail.startsWith('Processing deck')) {
+          // examples: "Processing deck 3/12" or "Processing deck 3/12: Card Name"
+          const match = detail.match(/^Processing deck\s+(\d+)\s*\/\s*(\d+)(?::\s*(.*))?/i);
+          if (match) {
+            currentDeckIndex = parseInt(match[1], 10);
+            totalDecks = parseInt(match[2], 10);
+            if (match[3]) currentDeckName = match[3];
+          }
+        }
+
+        setImportState(prev => ({ ...prev, stage, percent, detail, currentDeckName, currentDeckIndex, totalDecks }));
+      };
+
+      // onDeck will be called for each deck as it's parsed
+      const onDeck = async (deck: AnkiDeck) => {
+        // If the deck includes media blobs (streamed from the archive), persist them to the media store
+        if ((deck as any).mediaBlobs) {
+          const mediaMap: Record<string, Blob> = (deck as any).mediaBlobs;
+          for (const [filename, blob] of Object.entries(mediaMap)) {
+            try {
+              await dbService.saveMedia(user, filename, blob);
+              // Create an object URL for immediate rendering and replace token in card HTML
+              const objUrl = URL.createObjectURL(blob);
+              deck.cards = deck.cards.map(c => ({
+                ...c,
+                front: c.front.replace(new RegExp(`flowcards-media://${encodeURIComponent(filename)}`, 'g'), objUrl),
+                back: c.back.replace(new RegExp(`flowcards-media://${encodeURIComponent(filename)}`, 'g'), objUrl)
+              }));
+            } catch (e) {
+              console.warn(`Failed to save media ${filename}`, e);
+            }
+          }
+          // Remove mediaBlobs before saving deck to keep stored deck lightweight
+          delete (deck as any).mediaBlobs;
+        }
+
+        // Save deck as it's streamed
+        await dbService.saveDecks(user, [deck]);
+
+        // Update count and also refresh decks in UI incrementally
+        setImportState(prev => ({ ...prev, decksImported: prev.decksImported + 1 }));
+        const updatedDecks = await dbService.loadDecks(user);
+        setState(prev => ({ ...prev, decks: updatedDecks }));
+        await refreshDueCards(user, updatedDecks);
+      };
+
+      const parsedDecks = await parseAnkiFile(file, onProgress, onDeck);
+
+      // If parseAnkiFile returned decks (no streaming onDeck used), save them
+      if (Array.isArray(parsedDecks)) {
+        await dbService.saveDecks(user, parsedDecks);
+        setImportState(prev => ({ ...prev, decksImported: (prev.decksImported || 0) + parsedDecks.length }));
+        const updatedDecks = await dbService.loadDecks(user);
+        setState(prev => ({ ...prev, decks: updatedDecks }));
+        await refreshDueCards(user, updatedDecks);
+      }
+
+      setImportState(prev => ({ ...prev, percent: 100, stage: 'complete', isImporting: false }));
     } catch (err: any) {
       console.error(err);
-      setState(prev => ({ ...prev, isLoading: false, error: 'Import failed. File might be corrupted.' }));
+      setImportState({ isImporting: false, stage: 'error', percent: 100, detail: err.message || 'Import error', decksImported: (importState.decksImported || 0), isError: true, errorMessage: err.message || 'Import failed' });
+      setState(prev => ({ ...prev, error: 'Import failed. File might be corrupted.' }));
     }
   };
 
@@ -587,6 +674,16 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
+      <UploadProgress
+        isOpen={importState.isImporting || !!importState.isError}
+        stage={importState.stage}
+        percent={importState.percent}
+        detail={importState.detail}
+        decksImported={importState.decksImported}
+        isError={importState.isError}
+        errorMessage={importState.errorMessage}
+        onClose={() => setImportState(prev => ({ ...prev, isImporting: false, isError: false }))}
+      />
       {state.view === 'login' && (
         <div className="min-h-screen flex flex-col items-center justify-center p-6 bg-[radial-gradient(circle_at_center,rgba(79,70,229,0.05),transparent)]">
           <form onSubmit={handleAuth} className="w-full max-w-md bg-white rounded-[40px] shadow-2xl p-10 space-y-8 border border-slate-100 animate-in fade-in zoom-in-95 duration-500 relative z-10">

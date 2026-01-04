@@ -18,6 +18,8 @@ export interface AnkiDeck {
   id: number;
   name: string;
   cards: AnkiCard[];
+  // Optional map of media filename -> Blob extracted from the import package
+  mediaBlobs?: Record<string, Blob>;
 }
 
 export interface StudyLog {

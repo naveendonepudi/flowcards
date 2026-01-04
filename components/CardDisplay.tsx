@@ -1,6 +1,7 @@
 
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { AnkiCard } from '../types';
+import * as dbService from '../services/db';
 
 interface CardDisplayProps {
   card: AnkiCard;
@@ -19,6 +20,40 @@ export const CardDisplay: React.FC<CardDisplayProps> = ({ card, isFlipped, onFli
   };
 
   const isCloze = card.front.includes('{{c');
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const createdObjectUrls = useRef<string[]>([]);
+
+  // Replace flowcards-media:// tokens with object URLs fetched from the media store
+  useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el) return;
+
+    const user = localStorage.getItem('flowcards_session') || '';
+    const imgs = el.querySelectorAll('img');
+    imgs.forEach(async (img) => {
+      const src = img.getAttribute('src') || '';
+      if (src.startsWith('flowcards-media://')) {
+        const encoded = src.replace('flowcards-media://', '');
+        const filename = decodeURIComponent(encoded);
+        try {
+          const blob = await dbService.getMedia(user, filename);
+          if (blob) {
+            const url = URL.createObjectURL(blob);
+            createdObjectUrls.current.push(url);
+            img.setAttribute('src', url);
+          }
+        } catch (e) {
+          console.warn('Failed to resolve media blob', e);
+        }
+      }
+    });
+
+    return () => {
+      // Revoke object URLs created for this mount
+      createdObjectUrls.current.forEach(u => URL.revokeObjectURL(u));
+      createdObjectUrls.current = [];
+    };
+  }, [card.front, card.back]);
 
   return (
     <div 

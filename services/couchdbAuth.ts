@@ -12,12 +12,16 @@ function getCouchDBUrl(): string {
     return storedUrl;
   }
 
-  if (import.meta.env.DEV) {
-    const useProxy = localStorage.getItem('couchdb_use_proxy') === 'true';
-    if (useProxy) {
-      return '/couchdb';
+  // Use Vite's DEV flag if available
+  try {
+    // @ts-ignore - import.meta is injected by the bundler in dev
+    if ((import.meta as any).env?.DEV) {
+      const useProxy = localStorage.getItem('couchdb_use_proxy') === 'true';
+      if (useProxy) {
+        return '/couchdb';
+      }
     }
-  }
+  } catch (e) { /* ignore */ }
 
   if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.protocol === 'http:') {
     return `http://${window.location.hostname}:5984`;
